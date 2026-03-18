@@ -1,0 +1,226 @@
+package com.vahan;
+
+import java.io.*;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.*;
+
+public class VahanExcelProcessor {
+
+	public static void main(String[] args) {
+
+	    String inputFile = "D:/vehicle_input.xlsx";
+	    String outputFile = "D:/vehicle_output.xlsx";
+
+	    try (FileInputStream fis = new FileInputStream(inputFile);
+	         Workbook workbook = new XSSFWorkbook(fis);
+	         Workbook outWorkbook = new XSSFWorkbook()) {
+
+	        // STEP 1: Get Token
+	        String token = getToken();
+	        System.out.println("Token: " + token);
+
+	        // STEP 2: Read Input Sheet
+	        Sheet sheet = workbook.getSheetAt(0);
+
+	        // Output Sheet
+	        Sheet outSheet = outWorkbook.createSheet("Response");
+
+	        // ✅ Header (Updated)
+	        Row header = outSheet.createRow(0);
+	        header.createCell(0).setCellValue("Vehicle");
+	        header.createCell(1).setCellValue("Owner");
+	        header.createCell(2).setCellValue("RC Status");
+	        header.createCell(3).setCellValue("Fuel");
+	        header.createCell(4).setCellValue("Reg Date");
+
+	        int lastRow = sheet.getLastRowNum();
+
+	        for (int i = 1; i <= lastRow; i++) {
+
+	            Row row = sheet.getRow(i);
+	            if (row == null) continue;
+
+	            Cell cell = row.getCell(0);
+	            if (cell == null) continue;
+
+	            // ✅ Safe read (handles numeric/string both)
+	            cell.setCellType(CellType.STRING);
+	            String vehicleNo = cell.getStringCellValue().trim();
+
+	            if (vehicleNo.isEmpty()) continue;
+
+	            System.out.println("Processing: " + vehicleNo);
+
+	            String[] data;
+
+	            try {
+	                data = getVehicleDetails(token, vehicleNo);
+	            } catch (Exception e) {
+	                data = new String[]{
+	                        vehicleNo,
+	                        "ERROR",
+	                        e.getMessage(),
+	                        "",
+	                        ""
+	                };
+	            }
+
+	            // ✅ Write structured output
+	            Row outRow = outSheet.createRow(i);
+
+	            outRow.createCell(0).setCellValue(data[0]); // Vehicle
+	            outRow.createCell(1).setCellValue(data[1]); // Owner
+	            outRow.createCell(2).setCellValue(data[2]); // RC Status
+	            outRow.createCell(3).setCellValue(data[3]); // Fuel
+	            outRow.createCell(4).setCellValue(data[4]); // Reg Date
+
+	            // API safety delay
+	            Thread.sleep(500);
+	        }
+
+	        // Auto-size columns
+	        for (int i = 0; i < 5; i++) {
+	            outSheet.autoSizeColumn(i);
+	        }
+
+	        // Write output file
+	        try (FileOutputStream fos = new FileOutputStream(outputFile)) {
+	            outWorkbook.write(fos);
+	        }
+
+	        System.out.println("✅ Done! Output saved at: " + outputFile);
+
+	    } catch (Exception e) {
+	        e.printStackTrace();
+	    }
+	}
+
+    // ================= TOKEN API =================
+    public static String getToken() throws Exception {
+
+        String urlString = "https://api-platform.mastersindia.co/api/v1/token-auth/";
+        String jsonBody = "{\"username\":\"aayogagro@gmail.com\",\"password\":\"AAag12@@@$$$\"}";
+
+        URL url = new URL(urlString);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setRequestProperty("Accept", "application/json");
+
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(jsonBody.getBytes(StandardCharsets.UTF_8));
+        }
+
+        BufferedReader br = new BufferedReader(
+                new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+
+        StringBuilder response = new StringBuilder();
+        String line;
+
+        while ((line = br.readLine()) != null) {
+            response.append(line.trim());
+        }
+
+        JSONObject json = new JSONObject(response.toString());
+
+        conn.disconnect();
+
+        return json.getString("token");
+    }
+
+    // ================= VEHICLE API =================
+    public static String[] getVehicleDetails(String token, String vehicleNo) {
+
+        String[] result = new String[5]; // Vehicle, Owner, RC, Fuel, RegDate
+        result[0] = vehicleNo;
+
+        try {
+            String urlString = "https://api-platform.mastersindia.co/api/v2/sbt/VAHAN/";
+            String jsonBody = "{\"vehiclenumber\":\"" + vehicleNo + "\"}";
+
+            HttpURLConnection conn = (HttpURLConnection) new URL(urlString).openConnection();
+
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+
+            conn.setRequestProperty("Authorization", "JWT " + token);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Subid", "273325");
+            conn.setRequestProperty("Productid", "arap");
+            conn.setRequestProperty("Mode", "Buyer");
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(jsonBody.getBytes(StandardCharsets.UTF_8));
+            }
+
+            BufferedReader br = new BufferedReader(
+                    new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+
+            StringBuilder response = new StringBuilder();
+            String line;
+
+            while ((line = br.readLine()) != null) {
+                response.append(line);
+            }
+
+            conn.disconnect();
+
+            JSONObject json = new JSONObject(response.toString());
+
+            if (!json.has("data")) {
+                result[1] = "NOT FOUND";
+                return result;
+            }
+
+            JSONObject dataObj = json.getJSONObject("data");
+            JSONArray respArr = dataObj.getJSONArray("response");
+            JSONObject first = respArr.getJSONObject(0);
+
+            String xml = first.getString("response");
+
+            if (!xml.startsWith("<")) {
+                result[1] = xml;
+                return result;
+            }
+
+            // ✅ Parse XML
+            Document doc = DocumentBuilderFactory.newInstance()
+                    .newDocumentBuilder()
+                    .parse(new ByteArrayInputStream(xml.getBytes()));
+
+            doc.getDocumentElement().normalize();
+
+            result[1] = getTagValue(doc, "owner_name");
+            result[2] = getTagValue(doc, "rc_status");
+            result[3] = getTagValue(doc, "fuel_type");
+            result[4] = getTagValue(doc, "registration_date");
+
+        } catch (Exception e) {
+            result[1] = "ERROR";
+            result[2] = e.getMessage();
+        }
+
+        return result;
+    }
+
+    public static String getTagValue(Document doc, String tagName) {
+        try {
+            NodeList nodeList = doc.getElementsByTagName(tagName);
+            if (nodeList.getLength() > 0) {
+                return nodeList.item(0).getTextContent();
+            }
+        } catch (Exception e) {}
+        return "";
+    }
+}
